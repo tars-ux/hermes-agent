@@ -251,22 +251,32 @@ class PluginContext:
         description: str = "",
         emoji: str = "",
     ) -> None:
-        """Register a tool in the global registry **and** track it as plugin-provided."""
+        """Register a tool in the global registry **and** track it as plugin-provided.
+
+        Each tool registration is individually wrapped in try/except so a single
+        misbehaving tool definition never blocks other tools in the same plugin.
+        """
         from tools.registry import registry
 
-        registry.register(
-            name=name,
-            toolset=toolset,
-            schema=schema,
-            handler=handler,
-            check_fn=check_fn,
-            requires_env=requires_env,
-            is_async=is_async,
-            description=description,
-            emoji=emoji,
-        )
-        self._manager._plugin_tool_names.add(name)
-        logger.debug("Plugin %s registered tool: %s", self.manifest.name, name)
+        try:
+            registry.register(
+                name=name,
+                toolset=toolset,
+                schema=schema,
+                handler=handler,
+                check_fn=check_fn,
+                requires_env=requires_env,
+                is_async=is_async,
+                description=description,
+                emoji=emoji,
+            )
+            self._manager._plugin_tool_names.add(name)
+            logger.debug("Plugin %s registered tool: %s", self.manifest.name, name)
+        except Exception as exc:
+            logger.error(
+                "Plugin '%s' failed to register tool '%s': %s",
+                self.manifest.name, name, exc,
+            )
 
     # -- message injection --------------------------------------------------
 
