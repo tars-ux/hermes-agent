@@ -148,6 +148,8 @@ _PROVIDER_ALIASES = {
     "minimax-china": "minimax-cn",
     "minimax_cn": "minimax-cn",
     "claude": "anthropic",
+    "opencode": "opencode-zen",
+    "zen": "opencode-zen",
     "claude-code": "anthropic",
     "github": "copilot",
     "github-copilot": "copilot",
@@ -2702,10 +2704,11 @@ def auxiliary_max_tokens_param(value: int) -> dict:
     """
     custom_base = _current_custom_base_url()
     or_key = os.getenv("OPENROUTER_API_KEY")
-    # Only use max_completion_tokens for direct OpenAI custom endpoints
+    # Only use max_completion_tokens for direct OpenAI and Azure API Management endpoints
     if (not or_key
             and _read_nous_auth() is None
-            and base_url_hostname(custom_base) == "api.openai.com"):
+            and (base_url_hostname(custom_base) == "api.openai.com"
+                 or "azure-api.net" in (custom_base or "").lower())):
         return {"max_completion_tokens": value}
     return {"max_tokens": value}
 
@@ -3229,7 +3232,8 @@ def _build_call_kwargs(
         # Direct OpenAI api.openai.com with newer models needs max_completion_tokens.
         if provider == "custom":
             custom_base = base_url or _current_custom_base_url()
-            if base_url_hostname(custom_base) == "api.openai.com":
+            custom_host = base_url_hostname(custom_base)
+            if custom_host == "api.openai.com" or "azure-api.net" in (custom_base or "").lower():
                 kwargs["max_completion_tokens"] = max_tokens
             else:
                 kwargs["max_tokens"] = max_tokens

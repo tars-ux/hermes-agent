@@ -136,7 +136,7 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         transport="openai_chat",
         is_aggregator=True,
     ),
-    "opencode": HermesOverlay(
+    "opencode-zen": HermesOverlay(
         transport="openai_chat",
         is_aggregator=True,
         base_url_env_var="OPENCODE_ZEN_BASE_URL",
@@ -275,8 +275,8 @@ ALIASES: Dict[str, str] = {
     "vercel-ai-gateway": "vercel",
 
     # opencode (models.dev ID for OpenCode Zen)
-    "opencode-zen": "opencode",
-    "zen": "opencode",
+    "opencode": "opencode-zen",
+    "zen": "opencode-zen",
 
     # opencode-go
     "go": "opencode-go",
