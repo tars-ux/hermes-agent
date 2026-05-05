@@ -1931,6 +1931,7 @@ class AIAgent:
         # Persist for reuse on switch_model / fallback activation. Must come
         # AFTER the custom_providers branch so per-model overrides aren't lost.
         self._config_context_length = _config_context_length
+        self._custom_providers = _custom_providers
 
         self._ensure_lmstudio_runtime_loaded(_config_context_length)
 
@@ -2622,6 +2623,7 @@ class AIAgent:
                 api_key=aux_api_key,
                 config_context_length=getattr(self, "_aux_compression_context_length_config", None),
                 provider=getattr(self, "provider", ""),
+                custom_providers=getattr(self, "_custom_providers", None),
             )
 
             # Hard floor: the auxiliary compression model must have at least
@@ -2769,7 +2771,7 @@ class AIAgent:
             url = str(base_url).lower()
         else:
             url = getattr(self, "_base_url_lower", "") or ""
-        return "openai.azure.com" in url
+        return "openai.azure.com" in url or "azure-api.net" in url
 
     def _resolved_api_call_timeout(self) -> float:
         """Resolve the effective per-call request timeout in seconds.
@@ -2912,15 +2914,16 @@ class AIAgent:
         # rewards them with real cache hits.  Without this branch
         # qwen3.6-plus on opencode-go reports 0% cached tokens and burns
         # through the subscription on every turn.
+        # DISABLED 2026-05-01: opencode-go upstream rejects cache_control
+        # on multimodal content arrays. See WhatsApp bridge vision pipeline.
         model_is_qwen = "qwen" in model_lower
         provider_is_alibaba_family = provider_lower in {
             "opencode", "opencode-zen", "opencode-go", "alibaba",
         }
         if provider_is_alibaba_family and model_is_qwen:
-            # Envelope layout (native_anthropic=False): markers on inner
-            # content parts, not top-level tool messages.  Matches
-            # pi-mono's "alibaba" cacheControlFormat.
-            return True, False
+            # cache_control disabled for opencode-go — upstream rejects it
+            # on multimodal content parts (image_url + text arrays).
+            return False, False
 
         return False, False
 
@@ -7605,6 +7608,7 @@ class AIAgent:
                     self.model, base_url=self.base_url,
                     api_key=self.api_key, provider=self.provider,
                     config_context_length=getattr(self, "_config_context_length", None),
+                    custom_providers=getattr(self, "_custom_providers", None),
                 )
                 self.context_compressor.update_model(
                     model=self.model,
