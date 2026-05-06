@@ -89,6 +89,7 @@ def _telegram_retry_delay(exc: Exception, attempt: int) -> float | None:
         or "503" in text
         or "gateway timeout" in text
         or "504" in text
+        or "cannot schedule new futures after interpreter shutdown" in text
     ):
         return float(2 ** attempt)
     return None
@@ -720,7 +721,26 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                         parse_mode=None, **thread_kwargs
                     )
                 else:
-                    raise
+                    # Interpreter shutdown / event-loop-closed RuntimeError from
+                    # httpx → python-telegram-bot's NetworkError wrapper.
+                    # Recreate the Bot entirely and retry once — the internal
+                    # httpx AsyncClient may have a stale reference to a closed
+                    # event loop from a prior asyncio.run() lifecycle.
+                    err_text = str(md_error)
+                    if "cannot schedule new futures after interpreter shutdown" in err_text:
+                        logger.warning(
+                            "[Telegram] Event loop shutdown detected during send, "
+                            "rebuilding Bot and retrying once: %s",
+                            _sanitize_error_text(md_error),
+                        )
+                        bot = Bot(token=token)
+                        last_msg = await _send_telegram_message_with_retry(
+                            bot,
+                            chat_id=int_chat_id, text=formatted,
+                            parse_mode=send_parse_mode, **thread_kwargs
+                        )
+                    else:
+                        raise
 
         for media_path, is_voice in media_files:
             if not os.path.exists(media_path):
