@@ -530,6 +530,86 @@ def check_delegate_requirements() -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Auto-load matching skills into subagent system prompts
+# ---------------------------------------------------------------------------
+_AUTO_LOAD_ENABLED = True  # default; overridden by delegation.auto_load_skills config
+
+
+def _inject_matching_skills(
+    goal: str,
+    existing_context: Optional[str] = None,
+) -> str:
+    """Call auto_load_skill.py to find skills relevant to *goal*.
+
+    Returns formatted skill content ready to append to subagent context, or
+    ``""`` when no match is found, the script is unavailable, the feature is
+    disabled in config, or the context already carries skill content (prevents
+    double-injection when the caller already passed RELEVANT SKILL blocks).
+
+    Gated behind ``delegation.auto_load_skills`` in config.yaml (default
+    true).  Set to ``false`` to disable per-spawn overhead.
+    """
+    cfg = _load_config()
+    enabled = cfg.get("auto_load_skills", _AUTO_LOAD_ENABLED)
+    if not enabled:
+        return ""
+
+    # Context already carries skill content from explicit injection — skip.
+    if existing_context and (
+        "RELEVANT SKILL" in existing_context
+        or "--- BEGIN SKILL CONTENT ---" in existing_context
+        or "Auto-Loaded Skills" in existing_context
+    ):
+        return ""
+
+    import json
+    import subprocess
+
+    scripts_dir = os.path.join(os.path.expanduser("~"), ".hermes", "scripts")
+    script_path = os.path.join(scripts_dir, "auto_load_skill.py")
+    if not os.path.isfile(script_path):
+        return ""
+
+    try:
+        result = subprocess.run(
+            ["python3", script_path, "match", goal, "--semantic", "--json", "--top", "1"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+        if result.returncode != 0:
+            return ""
+
+        matches = json.loads(result.stdout)
+        if not matches:
+            return ""
+
+        best = matches[0]
+        score = float(best.get("score", 0))
+        if score < 0.05:
+            return ""
+
+        content = (best.get("content") or "").strip()
+        if not content:
+            return ""
+
+        return (
+            "\n\n## Auto-Loaded Skills for This Task\n\n"
+            f"The following skill has been auto-loaded because it matches "
+            f"your task goal (match score: {score:.3f}):\n\n"
+            f"**Skill:** {best['name']}\n"
+            f"**Description:** {best.get('description', '')}\n\n"
+            f"--- BEGIN SKILL CONTENT ---\n"
+            f"{content}\n"
+            f"--- END SKILL CONTENT ---"
+        )
+    except Exception as exc:
+        logger.debug("auto_load_skill injection failed: %s", exc)
+        return ""
+
+
 def _build_child_system_prompt(
     goal: str,
     context: Optional[str] = None,
@@ -552,8 +632,15 @@ def _build_child_system_prompt(
         "",
         f"YOUR TASK:\n{goal}",
     ]
-    if context and context.strip():
-        parts.append(f"\nCONTEXT:\n{context}")
+
+    # Auto-inject matching skills into subagent context
+    auto_skills = _inject_matching_skills(goal, context)
+    combined_context = context
+    if auto_skills:
+        combined_context = (context or "") + auto_skills
+
+    if combined_context and combined_context.strip():
+        parts.append(f"\nCONTEXT:\n{combined_context}")
     if workspace_path and str(workspace_path).strip():
         parts.append(
             "\nWORKSPACE PATH:\n"

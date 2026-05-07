@@ -108,16 +108,20 @@ def _strip_mdv2(text: str) -> str:
     Also removes MarkdownV2 formatting markers so the fallback
     doesn't show stray syntax characters from format_message conversion.
     """
-    # Remove escape backslashes before special characters
+    # 1) Remove escape backslashes before special characters
     cleaned = re.sub(r'\\([_*\[\]()~`>#\+\-=|{}.!\\])', r'\1', text)
-    # Remove MarkdownV2 bold markers that format_message converted from **bold**
+    # 2) Remove MarkdownV2 inline code markers (`code` → code) — must run
+    #    after unescape so backticks are literal, and before bold/italic
+    #    so asterisks and underscores inside code spans aren't touched.
+    cleaned = re.sub(r'`([^`]+)`', r'\1', cleaned)
+    # 3) Remove MarkdownV2 bold markers that format_message converted from **bold**
     cleaned = re.sub(r'\*([^*]+)\*', r'\1', cleaned)
-    # Remove MarkdownV2 italic markers that format_message converted from *italic*
-    # Use word boundary (\b) to avoid breaking snake_case like my_variable_name
+    # 4) Remove MarkdownV2 italic markers that format_message converted from *italic*
+    #    Use word boundary (\b) to avoid breaking snake_case like my_variable_name
     cleaned = re.sub(r'(?<!\w)_([^_]+)_(?!\w)', r'\1', cleaned)
-    # Remove MarkdownV2 strikethrough markers (~text~ → text)
+    # 5) Remove MarkdownV2 strikethrough markers (~text~ → text)
     cleaned = re.sub(r'~([^~]+)~', r'\1', cleaned)
-    # Remove MarkdownV2 spoiler markers (||text|| → text)
+    # 6) Remove MarkdownV2 spoiler markers (||text|| → text)
     cleaned = re.sub(r'\|\|([^|]+)\|\|', r'\1', cleaned)
     return cleaned
 
@@ -146,17 +150,41 @@ def _is_table_row(line: str) -> bool:
 
 
 def _split_markdown_table_row(line: str) -> list[str]:
-    """Split a simple GFM table row into stripped cell values."""
+    """Split a simple GFM table row into stripped cell values.
+
+    Respects backtick-wrapped inline code spans — pipe characters
+    inside `` ` `` pairs are NOT treated as cell separators, preventing
+    code like `` `cat | grep` `` from being split into three cells.
+    """
     stripped = line.strip()
     if stripped.startswith("|"):
         stripped = stripped[1:]
     if stripped.endswith("|"):
         stripped = stripped[:-1]
-    return [cell.strip() for cell in stripped.split("|")]
+
+    cells: list[str] = []
+    current: list[str] = []
+    in_code = False
+    for ch in stripped:
+        if ch == "`":
+            in_code = not in_code
+            current.append(ch)
+        elif ch == "|" and not in_code:
+            cells.append("".join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    cells.append("".join(current).strip())
+
+    return cells
 
 
 def _render_table_block_for_telegram(table_block: list[str]) -> str:
-    """Render a detected GFM table as Telegram-friendly row groups."""
+    """Render a detected GFM table as compact labeled rows for Telegram.
+
+    Telegram has no table syntax, so we convert pipe tables into
+    compact single-line entries with the first cell as the label.
+    """
     if len(table_block) < 3:
         return "\n".join(table_block)
 
@@ -164,21 +192,38 @@ def _render_table_block_for_telegram(table_block: list[str]) -> str:
     if len(headers) < 2:
         return "\n".join(table_block)
 
+    num_cols = len(headers)
     rendered_rows: list[str] = []
+
     for index, row in enumerate(table_block[2:], start=1):
         cells = _split_markdown_table_row(row)
-        if len(cells) < len(headers):
-            cells.extend([""] * (len(headers) - len(cells)))
-        elif len(cells) > len(headers):
-            cells = cells[: len(headers)]
+        if len(cells) < num_cols:
+            cells.extend([""] * (num_cols - len(cells)))
+        elif len(cells) > num_cols:
+            cells = cells[:num_cols]
 
-        heading = next((cell for cell in cells if cell), f"Row {index}")
-        rendered_rows.append(f"**{heading}**")
-        rendered_rows.extend(
-            f"• {header}: {value}" for header, value in zip(headers, cells)
-        )
+        first = cells[0] or f"Row {index}"
+        # Strip existing **bold** markers from the first cell before wrapping
+        # in **...** to prevent ****double**** wrapping that corrupts
+        # subsequent MarkdownV2 bold conversion.
+        first = re.sub(r"^\*\*|\*\*$", "", first)
 
-    return "\n\n".join(rendered_rows)
+        if num_cols == 2:
+            # Two-column tables: Setting: Value
+            rendered_rows.append(f"• **{first}:** {cells[1]}")
+        elif num_cols == 3:
+            # Three-column tables: Setting: Value — Status
+            rest = " — ".join(cells[1:])
+            rendered_rows.append(f"• **{first}:** {rest}")
+        else:
+            # Four+ columns: Setting heading, then compact detail bullets
+            details = "\n  ".join(
+                f"• {headers[i]}: {cells[i]}"
+                for i in range(1, num_cols) if cells[i]
+            )
+            rendered_rows.append(f"• **{first}**\n  {details}")
+
+    return "\n".join(rendered_rows)
 
 
 def _wrap_markdown_tables(text: str) -> str:
@@ -2508,11 +2553,18 @@ class TelegramAdapter(BasePlatformAdapter):
         )
 
         # 5) Convert bold: **text** → *text* (MarkdownV2 bold)
-        text = re.sub(
-            r'\*\*(.+?)\*\*',
-            lambda m: _ph(f'*{_escape_mdv2(m.group(1))}*'),
-            text,
-        )
+        #    Use a temporary \x00B...\x00B marker so step 6 (italic) can
+        #    distinguish bold markers from italic markers — step 6's regex
+        #    matches *text* which would incorrectly re-process bold output.
+        #    After step 6 we restore the bold markers as proper placeholders.
+        _bold_cache: dict[int, str] = {}
+
+        def _convert_bold(m):
+            idx = len(_bold_cache)
+            _bold_cache[idx] = _escape_mdv2(m.group(1))
+            return f"\x00B{idx}\x00B"
+
+        text = re.sub(r'\*\*(.+?)\*\*', _convert_bold, text)
 
         # 6) Convert italic: *text* (single asterisk) → _text_ (MarkdownV2 italic)
         #    [^*\n]+ prevents matching across newlines (which would corrupt
@@ -2522,6 +2574,14 @@ class TelegramAdapter(BasePlatformAdapter):
             lambda m: _ph(f'_{_escape_mdv2(m.group(1))}_'),
             text,
         )
+
+        # 6.5) Restore bold markers: \x00Bidx\x00B → placeholder with *text*
+        def _restore_bold(m):
+            idx = int(m.group(1))
+            return _ph(f'*{_bold_cache[idx]}*')
+
+        text = re.sub(r'\x00B(\d+)\x00B', _restore_bold, text)
+        _bold_cache.clear()
 
         # 7) Convert strikethrough: ~~text~~ → ~text~ (MarkdownV2)
         text = re.sub(
@@ -2552,6 +2612,28 @@ class TelegramAdapter(BasePlatformAdapter):
         text = re.sub(
             r'^((?:\*\*)?>{1,3}) (.+)$',
             _convert_blockquote,
+            text,
+            flags=re.MULTILINE,
+        )
+
+        # 9.5) Protect MarkdownV2 list markers at line start so step 10's
+        #      escape pass doesn't break bullet / ordered lists.
+        #      MarkdownV2 treats `- `, `* `, `+ ` at line start as bullet
+        #      markers and `1. ` / `10. ` as ordered list markers.  Escaping
+        #      the leading character turns them into literal plain text
+        #      instead of proper list items.
+        def _protect_list_marker(m):
+            return _ph(m.group(0))
+
+        text = re.sub(
+            r'^([ \t]*[-*+]) (?=[^\n])',
+            _protect_list_marker,
+            text,
+            flags=re.MULTILINE,
+        )
+        text = re.sub(
+            r'^([ \t]*\d+\.) (?=[^\n])',
+            _protect_list_marker,
             text,
             flags=re.MULTILINE,
         )

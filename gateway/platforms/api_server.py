@@ -2370,7 +2370,8 @@ class APIServerAdapter(BasePlatformAdapter):
     # /v1/runs — structured event streaming
     # ------------------------------------------------------------------
 
-    _MAX_CONCURRENT_RUNS = 10  # Prevent unbounded resource allocation
+    _MAX_CONCURRENT_RUNS = 25  # Prevent unbounded resource allocation
+    _DM_RESERVED_SLOTS = 2   # Slots reserved for DMs over group chats
     _RUN_STREAM_TTL = 300  # seconds before orphaned runs are swept
     _RUN_STATUS_TTL = 3600  # seconds to retain terminal run status for polling
 
@@ -2441,17 +2442,33 @@ class APIServerAdapter(BasePlatformAdapter):
         if auth_err:
             return auth_err
 
-        # Enforce concurrency limit
-        if len(self._run_streams) >= self._MAX_CONCURRENT_RUNS:
-            return web.json_response(
-                _openai_error(f"Too many concurrent runs (max {self._MAX_CONCURRENT_RUNS})", code="rate_limit_exceeded"),
-                status=429,
-            )
-
         try:
             body = await request.json()
         except Exception:
             return web.json_response(_openai_error("Invalid JSON"), status=400)
+
+        # Enforce concurrency limit with DM priority.
+        # DMs get reserved slots so the user's messages always go through
+        # even when a busy group chat consumes most concurrent slots.
+        session_id = body.get("session_id", "")
+        is_dm = "-dm:" in session_id or session_id.startswith("whatsapp-dm:")
+        current = len(self._run_streams)
+        if current >= self._MAX_CONCURRENT_RUNS:
+            # Hard limit reached — reject everything
+            return web.json_response(
+                _openai_error(f"Too many concurrent runs (max {self._MAX_CONCURRENT_RUNS})", code="rate_limit_exceeded"),
+                status=429,
+            )
+        if not is_dm and current >= self._MAX_CONCURRENT_RUNS - self._DM_RESERVED_SLOTS:
+            # Only DMs allowed past the reserved slot threshold
+            return web.json_response(
+                _openai_error(
+                    f"Too many concurrent runs (max {self._MAX_CONCURRENT_RUNS}, "
+                    f"{self._DM_RESERVED_SLOTS} reserved for DMs)",
+                    code="rate_limit_exceeded",
+                ),
+                status=429,
+            )
 
         raw_input = body.get("input")
         if not raw_input:

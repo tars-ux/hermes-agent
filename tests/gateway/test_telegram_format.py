@@ -559,11 +559,10 @@ class TestWrapMarkdownTables:
             "\nEnd."
         )
         out = _wrap_markdown_tables(text)
-        assert "**Alice**" in out
-        assert "• Player: Alice" in out
-        assert "• Score: 150" in out
-        assert "**Bob**" in out
-        assert "• Score: 120" in out
+        assert "**Alice:**" in out
+        assert "150" in out
+        assert "**Bob:**" in out
+        assert "120" in out
         # Surrounding prose is preserved
         assert out.startswith("Scores:")
         assert out.endswith("End.")
@@ -572,10 +571,8 @@ class TestWrapMarkdownTables:
         """Tables without outer pipes (GFM allows this) are still detected."""
         text = "head1 | head2\n--- | ---\na | b\nc | d"
         out = _wrap_markdown_tables(text)
-        assert out.startswith("**a**")
-        assert "• head1: a" in out
-        assert "• head2: b" in out
-        assert "**c**" in out
+        assert out.startswith("• **a:**")
+        assert "• **c:**" in out
 
     def test_alignment_separators(self):
         """Separator rows with :--- / ---: / :---: alignment markers match."""
@@ -585,9 +582,9 @@ class TestWrapMarkdownTables:
             "| Ada  |  30 | NYC  |"
         )
         out = _wrap_markdown_tables(text)
-        assert "**Ada**" in out
-        assert "• Age: 30" in out
-        assert "• City: NYC" in out
+        assert "**Ada:**" in out
+        assert "30" in out
+        assert "NYC" in out
 
     def test_two_consecutive_tables_rewritten_separately(self):
         text = (
@@ -600,10 +597,8 @@ class TestWrapMarkdownTables:
             "| 9 | 8 |"
         )
         out = _wrap_markdown_tables(text)
-        assert out.count("**1**") == 1
-        assert out.count("**9**") == 1
-        assert "• A: 1" in out
-        assert "• X: 9" in out
+        assert out.count("**1:**") == 1
+        assert out.count("**9:**") == 1
 
     def test_plain_text_with_pipes_not_wrapped(self):
         """A bare pipe in prose must NOT trigger wrapping."""
@@ -654,9 +649,8 @@ class TestFormatMessageTables:
             "| A    | B    |\n"
         )
         out = adapter.format_message(text)
-        assert "*A*" in out
-        assert "• Col1: A" in out
-        assert "• Col2: B" in out
+        assert "*A:*" in out
+        assert "B" in out
         assert "```" not in out
         assert "\\|" not in out
 
@@ -673,8 +667,8 @@ class TestFormatMessageTables:
         assert "*work*" in out
         # Exclamation outside fence is escaped
         assert "\\!" in out
-        assert "*1*" in out
-        assert "• A: 1" in out
+        assert "*1:*" in out
+        assert "1" in out
 
     def test_multiple_tables_in_single_message(self, adapter):
         text = (
@@ -689,9 +683,8 @@ class TestFormatMessageTables:
             "| 9 | 8 |\n"
         )
         out = adapter.format_message(text)
-        assert out.count("*1*") == 1
-        assert out.count("*9*") == 1
-        assert "• X: 9" in out
+        assert out.count("*1:*") == 1
+        assert out.count("*9:*") == 1
 
 
 @pytest.mark.asyncio

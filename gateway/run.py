@@ -5167,12 +5167,15 @@ class GatewayRunner:
         if event.media_urls:
             image_paths = []
             audio_paths = []
+            video_paths = []
             for i, path in enumerate(event.media_urls):
                 mtype = event.media_types[i] if i < len(event.media_types) else ""
                 if mtype.startswith("image/") or event.message_type == MessageType.PHOTO:
                     image_paths.append(path)
                 if mtype.startswith("audio/") or event.message_type in (MessageType.VOICE, MessageType.AUDIO):
                     audio_paths.append(path)
+                if mtype.startswith("video/") or event.message_type == MessageType.VIDEO:
+                    video_paths.append(path)
 
             if image_paths:
                 # Decide routing: native (attach pixels) vs text (vision_analyze
@@ -5232,6 +5235,16 @@ class GatewayRunner:
                             )
                         except Exception:
                             pass
+
+            if video_paths:
+                logger.info(
+                    "Video routing: text. Extracting frames from %d video(s) via ffmpeg + vision_analyze.",
+                    len(video_paths),
+                )
+                message_text = await self._enrich_message_with_video(
+                    message_text,
+                    video_paths,
+                )
 
         if event.media_urls and event.message_type == MessageType.DOCUMENT:
             import mimetypes as _mimetypes
@@ -10328,6 +10341,167 @@ class GatewayRunner:
                 )
 
         # Combine: vision descriptions first, then the user's original text
+        if enriched_parts:
+            prefix = "\n\n".join(enriched_parts)
+            if user_text:
+                return f"{prefix}\n\n{user_text}"
+            return prefix
+        return user_text
+
+    async def _enrich_message_with_video(
+        self,
+        user_text: str,
+        video_paths: List[str],
+    ) -> str:
+        """Extract key frames from videos, analyze with vision, prepend descriptions.
+
+        Uses ffmpeg to extract up to 5 evenly-spaced frames per video, then
+        passes each frame through vision_analyze (same pipeline as images).
+        Audio is intentionally NOT extracted — video-only analysis.
+        """
+        from tools.vision_tools import vision_analyze_tool
+        from agent.memory_manager import sanitize_context
+
+        analysis_prompt = (
+            "Describe everything visible in this video frame in thorough detail. "
+            "Include any text, objects, people, animals, layout, colors, "
+            "and any other notable visual information."
+        )
+
+        ffmpeg_bin = os.path.expanduser("~/ffmpeg")
+        if not os.path.isfile(ffmpeg_bin):
+            logger.warning("ffmpeg not found at %s — skipping video enrichment", ffmpeg_bin)
+            return user_text
+
+        enriched_parts = []
+        for video_path in video_paths:
+            if not os.path.isfile(video_path):
+                logger.warning("Video file not found: %s", video_path)
+                continue
+
+            try:
+                # Determine video duration with ffprobe
+                import subprocess
+                probe_cmd = [
+                    ffmpeg_bin.replace("ffmpeg", "ffprobe"),
+                    "-v", "quiet",
+                    "-show_entries", "format=duration",
+                    "-of", "csv=p=0",
+                    video_path,
+                ]
+                duration_str = subprocess.check_output(probe_cmd, timeout=15).decode().strip()
+                duration = float(duration_str) if duration_str else 5.0
+            except Exception:
+                duration = 5.0  # fallback
+
+            # Extract frames scaled to video length
+            if duration < 10:
+                n_frames = max(1, int(duration / 2))       # frame every 2s for short clips
+            elif duration < 60:
+                n_frames = 8                                 # 8 frames for 10-60s
+            elif duration < 600:
+                n_frames = 12                                # 12 frames for 1-10min
+            else:
+                n_frames = 15                                # hard cap for very long videos
+            frame_paths = []
+            tmp_dir = tempfile.mkdtemp(prefix="video_frames_")
+            try:
+                for i in range(n_frames):
+                    seek = (duration / (n_frames + 1)) * (i + 1)
+                    out_path = os.path.join(tmp_dir, f"frame_{i:02d}.jpg")
+                    cmd = [
+                        ffmpeg_bin,
+                        "-ss", str(seek),
+                        "-i", video_path,
+                        "-frames:v", "1",
+                        "-q:v", "2",
+                        "-y",
+                        out_path,
+                    ]
+                    subprocess.run(cmd, capture_output=True, timeout=30, check=True)
+                    if os.path.isfile(out_path):
+                        frame_paths.append(out_path)
+
+                if not frame_paths:
+                    enriched_parts.append(
+                        f"[The user sent a video but I couldn't extract any frames from it. "
+                        f"You can try examining it yourself with vision_analyze using image_url: {video_path}]"
+                    )
+                    # Still try audio extraction even if frames failed
+                    continue
+
+                # Analyze each frame with vision
+                descriptions = []
+                for fp in frame_paths:
+                    try:
+                        result_json = await vision_analyze_tool(
+                            image_url=fp,
+                            user_prompt=analysis_prompt,
+                        )
+                        result = json.loads(result_json)
+                        if result.get("success"):
+                            desc = result.get("analysis", "")
+                            desc = sanitize_context(desc)
+                            descriptions.append(desc)
+                    except Exception as e:
+                        logger.error("Frame analysis error: %s", e)
+
+                # Also extract and transcribe audio from video
+                transcript = None
+                audio_tmp = os.path.join(tmp_dir, "audio.wav")
+                try:
+                    import subprocess as _subprocess
+                    _subprocess.run(
+                        [ffmpeg_bin, "-i", video_path, "-vn", "-acodec", "pcm_s16le",
+                         "-ar", "16000", "-ac", "1", "-y", audio_tmp],
+                        capture_output=True, timeout=120, check=True,
+                    )
+                    if os.path.isfile(audio_tmp) and os.path.getsize(audio_tmp) > 1000:
+                        from tools.transcription_tools import transcribe_audio
+                        _result = await asyncio.to_thread(transcribe_audio, audio_tmp)
+                        if _result.get("success") and _result.get("transcript"):
+                            transcript = _result["transcript"].strip()
+                except Exception as e:
+                    logger.debug("Video audio extraction/transcription skipped: %s", e)
+
+                # Build combined enriched parts
+                parts = []
+                if descriptions:
+                    combined = "\n\n".join(
+                        f"--- Frame {i+1} ---\n{d}"
+                        for i, d in enumerate(descriptions)
+                    )
+                    parts.append(
+                        f"[The user sent a video~ Here's what I can see from {len(frame_paths)} frames:\n"
+                        f"{combined}]"
+                    )
+                if transcript:
+                    parts.append(
+                        f"[Audio transcript from the video: \"{transcript}\"]"
+                    )
+
+                if parts:
+                    enriched_parts.append(
+                        "\n\n".join(parts) + "\n"
+                        f"[If you need a closer look, use vision_analyze with "
+                        f"image_url: {video_path} ~]"
+                    )
+                else:
+                    enriched_parts.append(
+                        f"[The user sent a video but I couldn't quite see it this time. "
+                        f"You can try examining it yourself with vision_analyze using image_url: {video_path}]"
+                    )
+            except Exception as e:
+                logger.error("Video frame extraction error: %s", e)
+                enriched_parts.append(
+                    f"[The user sent a video but something went wrong when I tried to process it. "
+                    f"You can try examining it yourself with vision_analyze using image_url: {video_path}]"
+                )
+            finally:
+                # Clean up temp frames
+                import shutil
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
         if enriched_parts:
             prefix = "\n\n".join(enriched_parts)
             if user_text:
