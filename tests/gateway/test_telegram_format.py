@@ -436,6 +436,157 @@ class TestFormatMessageBlockquote:
 
 
 # =========================================================================
+# format_message - dashes, list markers, dividers
+# =========================================================================
+#
+# Regression suite for the "Can't parse entities: character '-' is reserved
+# and must be escaped" error.  Telegram MarkdownV2 has NO native list syntax,
+# so `- `, `* `, `+ `, and `1. ` at line start are NOT special and their
+# leading characters MUST be escaped.  An earlier revision "protected" these
+# markers from escape, which produced invalid MarkdownV2.
+
+
+class TestFormatMessageDashesAndLists:
+    def _assert_no_unescaped_dash(self, result: str) -> None:
+        """No bare `-` outside code spans/blocks/links may survive escape pass."""
+        # Strip code spans and blocks before scanning
+        stripped = re.sub(r"```[\s\S]*?```", "", result)
+        stripped = re.sub(r"`[^`]+`", "", stripped)
+        # Strip link URLs (which may contain unescaped dashes by spec — only
+        # ')' and '\' need escaping inside link URLs)
+        stripped = re.sub(r"\[[^\]]+\]\([^)]+\)", "", stripped)
+        # After stripping, find every '-' and ensure it is preceded by '\'
+        for idx, ch in enumerate(stripped):
+            if ch == "-":
+                assert idx > 0 and stripped[idx - 1] == "\\", (
+                    f"Unescaped '-' at index {idx} in {stripped!r}"
+                )
+
+    def _assert_no_unescaped_char(self, result: str, char: str) -> None:
+        """Same as _assert_no_unescaped_dash, parameterised."""
+        stripped = re.sub(r"```[\s\S]*?```", "", result)
+        stripped = re.sub(r"`[^`]+`", "", stripped)
+        stripped = re.sub(r"\[[^\]]+\]\([^)]+\)", "", stripped)
+        for idx, ch in enumerate(stripped):
+            if ch == char:
+                assert idx > 0 and stripped[idx - 1] == "\\", (
+                    f"Unescaped {char!r} at index {idx} in {stripped!r}"
+                )
+
+    def test_dash_list_at_line_start_escaped(self, adapter):
+        """`- item` must produce `\\- item` — MarkdownV2 has no list syntax."""
+        result = adapter.format_message("- first\n- second")
+        assert result == "\\- first\n\\- second"
+        self._assert_no_unescaped_dash(result)
+
+    def test_asterisk_list_at_line_start_escaped(self, adapter):
+        """`* item` must produce `\\* item` — escaped, not preserved."""
+        result = adapter.format_message("* Alpha\n* Beta")
+        assert result == "\\* Alpha\n\\* Beta"
+        self._assert_no_unescaped_char(result, "*")
+
+    def test_plus_list_at_line_start_escaped(self, adapter):
+        result = adapter.format_message("+ one\n+ two")
+        assert result == "\\+ one\n\\+ two"
+        self._assert_no_unescaped_char(result, "+")
+
+    def test_numbered_list_dot_escaped(self, adapter):
+        """`1. text` must escape the dot — `1\\. text`."""
+        result = adapter.format_message("1. First\n2. Second")
+        assert result == "1\\. First\n2\\. Second"
+
+    def test_indented_list_marker_escaped(self, adapter):
+        """Indented list `  - sub item` still escapes the dash."""
+        result = adapter.format_message("  - sub item")
+        assert result == "  \\- sub item"
+
+    def test_cron_divider_dashes_all_escaped(self, adapter):
+        """The `-------------` divider used by cron wrappers must escape every dash."""
+        result = adapter.format_message("Header\n-------------\n\nContent")
+        # Every dash in the divider line must be backslash-escaped
+        assert "\\-" * 13 in result
+        # Bare unescaped runs of '-' must NOT appear
+        assert re.search(r"(?<!\\)-{2,}", result) is None
+
+    def test_dash_in_middle_of_word_escaped(self, adapter):
+        result = adapter.format_message("a-b-c")
+        assert result == "a\\-b\\-c"
+
+    def test_dash_inside_inline_code_not_escaped(self, adapter):
+        """Inside `code spans`, dashes must remain literal (only \\ and ` need escape)."""
+        result = adapter.format_message("Run `rm -rf` carefully")
+        assert "`rm -rf`" in result
+
+    def test_dash_inside_fenced_code_not_escaped(self, adapter):
+        result = adapter.format_message("```\nls -la\n```")
+        assert "ls -la" in result
+        # No backslash before the dash inside the code block
+        assert "\\-la" not in result
+
+    def test_em_dash_unicode_not_escaped(self, adapter):
+        """U+2014 EM DASH is not in the MarkdownV2 reserved set."""
+        result = adapter.format_message("This — is fine")
+        assert "—" in result
+        assert "\\—" not in result
+
+    def test_list_with_bold_inner_still_escaped(self, adapter):
+        """`- **Important**: details` → `\\- *Important*: details`."""
+        result = adapter.format_message("- **Important**: details")
+        assert result.startswith("\\- ")
+        assert "*Important*" in result
+
+    def test_list_with_inline_code_inner(self, adapter):
+        """List item containing inline code preserves the code intact."""
+        result = adapter.format_message("- Use `git status` to check")
+        assert result.startswith("\\- ")
+        assert "`git status`" in result
+
+    def test_no_unescaped_dash_in_mixed_message(self, adapter):
+        """Realistic cron-wrapped agent response has no unescaped reserved chars."""
+        text = (
+            "Cronjob Response: smoke\n"
+            "(job_id: abc-123)\n"
+            "-------------\n\n"
+            "Status: ok\n"
+            "- check 1 passed\n"
+            "- check 2 passed\n\n"
+            "To stop or manage this job, send me a new message."
+        )
+        result = adapter.format_message(text)
+        self._assert_no_unescaped_dash(result)
+
+    def test_quotation_marks_passthrough(self, adapter):
+        """Curly/straight quotes are not in the reserved set."""
+        result = adapter.format_message('She said "hello" and ‘world’')
+        # Quotes survive without escaping
+        assert '"hello"' in result
+        assert "‘world’" in result
+
+    def test_dot_outside_code_escaped(self, adapter):
+        result = adapter.format_message("Version 1.2.3 released.")
+        assert "1\\.2\\.3" in result
+        assert "released\\." in result
+
+    def test_underscore_in_snake_case_escaped(self, adapter):
+        """`my_var` outside code becomes `_var_` italic; force escape with code or escape."""
+        # Plain text snake_case will be picked up as italic by MarkdownV2,
+        # which is why agents should wrap identifiers in backticks.  Verify
+        # the fallback _strip_mdv2 path correctly preserves snake_case.
+        result = adapter.format_message("`my_var_name`")
+        assert "`my_var_name`" in result
+
+    def test_bold_marker_inside_list_item(self, adapter):
+        """Bold inside a list item: marker gets escaped, bold gets converted."""
+        result = adapter.format_message("- **Note:** this is important.")
+        # Dash marker escaped
+        assert result.startswith("\\- ")
+        # Bold converted to MarkdownV2 syntax
+        assert "*Note:*" in result
+        # Trailing period escaped
+        assert "important\\." in result
+
+
+# =========================================================================
 # format_message - mixed/complex
 # =========================================================================
 

@@ -2616,27 +2616,15 @@ class TelegramAdapter(BasePlatformAdapter):
             flags=re.MULTILINE,
         )
 
-        # 9.5) Protect MarkdownV2 list markers at line start so step 10's
-        #      escape pass doesn't break bullet / ordered lists.
-        #      MarkdownV2 treats `- `, `* `, `+ ` at line start as bullet
-        #      markers and `1. ` / `10. ` as ordered list markers.  Escaping
-        #      the leading character turns them into literal plain text
-        #      instead of proper list items.
-        def _protect_list_marker(m):
-            return _ph(m.group(0))
-
-        text = re.sub(
-            r'^([ \t]*[-*+]) (?=[^\n])',
-            _protect_list_marker,
-            text,
-            flags=re.MULTILINE,
-        )
-        text = re.sub(
-            r'^([ \t]*\d+\.) (?=[^\n])',
-            _protect_list_marker,
-            text,
-            flags=re.MULTILINE,
-        )
+        # 9.5) NOTE: MarkdownV2 has NO native list syntax — `- `, `* `, `+ `,
+        #      and `1. ` at line start are NOT special.  An earlier revision
+        #      "protected" these markers from escape, which left a bare `-`,
+        #      `*`, `+`, or `.` in the output.  Telegram then rejected the
+        #      message with: character "-" is reserved and must be escaped.
+        #      The correct behavior is to let step 10 escape them like any
+        #      other reserved char — the rendered output (`\- item`) shows
+        #      a literal dash followed by the item, which is visually a
+        #      bullet list.
 
         # 10) Escape remaining special characters in plain text
         text = _escape_mdv2(text)
