@@ -1410,48 +1410,14 @@ class SignalAdapter(BasePlatformAdapter):
         return result is not None
 
     # ------------------------------------------------------------------
-    # Processing Lifecycle Hooks (reactions as progress indicators)
+    # Processing Lifecycle Hooks — no-op, reactions are agent-driven
     # ------------------------------------------------------------------
 
-    def _extract_reaction_target(self, event: MessageEvent) -> Optional[tuple]:
-        """Extract (target_author, target_timestamp) from a MessageEvent.
-
-        Returns None if the event doesn't carry the raw Signal envelope data
-        needed for sendReaction.
-        """
-        raw = event.raw_message
-        if not isinstance(raw, dict):
-            return None
-        author = raw.get("sender")
-        ts = raw.get("timestamp_ms")
-        if not author or not ts:
-            return None
-        return (author, ts)
-
     async def on_processing_start(self, event: MessageEvent) -> None:
-        """React with 👀 when processing begins."""
-        target = self._extract_reaction_target(event)
-        if target:
-            await self.send_reaction(event.source.chat_id, "👀", *target)
+        """No-op: reactions are agent-driven via the `react` tool."""
 
     async def on_processing_complete(self, event: MessageEvent, outcome: "ProcessingOutcome") -> None:
-        """Swap the 👀 reaction for ✅ (success) or ❌ (failure).
-
-        On CANCELLED we leave the 👀 in place — no terminal outcome means
-        the reaction should keep reflecting "in progress" (matches Telegram).
-        """
-        if outcome == ProcessingOutcome.CANCELLED:
-            return
-        target = self._extract_reaction_target(event)
-        if not target:
-            return
-        chat_id = event.source.chat_id
-        # Remove the in-progress reaction, then add the final one
-        await self.remove_reaction(chat_id, *target)
-        if outcome == ProcessingOutcome.SUCCESS:
-            await self.send_reaction(chat_id, "✅", *target)
-        elif outcome == ProcessingOutcome.FAILURE:
-            await self.send_reaction(chat_id, "❌", *target)
+        """No-op: reactions are agent-driven via the `react` tool."""
 
     # ------------------------------------------------------------------
     # Chat Info

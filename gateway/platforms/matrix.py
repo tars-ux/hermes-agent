@@ -1930,40 +1930,14 @@ class MatrixAdapter(BasePlatformAdapter):
         return await self.redact_message(room_id, reaction_event_id, reason)
 
     async def on_processing_start(self, event: MessageEvent) -> None:
-        """Add eyes reaction when the agent starts processing a message."""
-        if not self._reactions_enabled:
-            return
-        msg_id = event.message_id
-        room_id = event.source.chat_id
-        if msg_id and room_id:
-            reaction_event_id = await self._send_reaction(room_id, msg_id, "\U0001f440")
-            if reaction_event_id:
-                self._pending_reactions[(room_id, msg_id)] = reaction_event_id
+        """No-op: reactions are agent-driven via the `react` tool."""
 
     async def on_processing_complete(
         self,
         event: MessageEvent,
         outcome: ProcessingOutcome,
     ) -> None:
-        """Replace eyes with checkmark (success) or cross (failure)."""
-        if not self._reactions_enabled:
-            return
-        msg_id = event.message_id
-        room_id = event.source.chat_id
-        if not msg_id or not room_id:
-            return
-        if outcome == ProcessingOutcome.CANCELLED:
-            return
-        reaction_key = (room_id, msg_id)
-        if reaction_key in self._pending_reactions:
-            eyes_event_id = self._pending_reactions.pop(reaction_key)
-            if not await self._redact_reaction(room_id, eyes_event_id):
-                logger.debug("Matrix: failed to redact eyes reaction %s", eyes_event_id)
-        await self._send_reaction(
-            room_id,
-            msg_id,
-            "\u2705" if outcome == ProcessingOutcome.SUCCESS else "\u274c",
-        )
+        """No-op: reactions are agent-driven via the `react` tool."""
 
     async def _on_reaction(self, event: Any) -> None:
         """Handle incoming reaction events."""
